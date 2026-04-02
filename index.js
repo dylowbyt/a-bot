@@ -1,3 +1,4 @@
+// index.js - WhatsApp AI Bot dengan fitur stiker (menggunakan sharp + ffmpeg)
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const express = require('express');
 const qrcode = require('qrcode');
@@ -8,26 +9,38 @@ const ffmpegPath = require('ffmpeg-static');
 const { Readable } = require('stream');
 require('dotenv').config();
 
+// Set path ffmpeg
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Konfigurasi OpenAI
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const AI_MODEL = process.env.AI_MODEL || "gpt-3.5-turbo";
 
+// State untuk QR code
 let latestQR = null;
 let latestQRImage = null;
 
+// Inisialisasi WhatsApp Client dengan konfigurasi Puppeteer yang benar
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
         headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--disable-gpu',
+            '--disable-features=HttpsFirstBalancedModeAutoEnable' // untuk menghindari error net::ERR_BLOCKED_BY_CLIENT
+        ]
     }
 });
 
+// ---------- Fungsi AI ----------
 async function chatWithAI(userMessage) {
     try {
         const response = await axios.post('https://api.openai.com/v1/chat/completions', {
@@ -40,12 +53,12 @@ async function chatWithAI(userMessage) {
         });
         return response.data.choices[0].message.content;
     } catch (error) {
-        console.error('OpenAI Error:', error.response?.data || error.message);
+        console.error('❌ OpenAI Error:', error.response?.data || error.message);
         return "Maaf, sedang terjadi gangguan. Coba lagi nanti ya.";
     }
 }
 
-// Fungsi membuat stiker dari buffer gambar menggunakan sharp + ffmpeg
+// ---------- Fungsi membuat stiker dari buffer gambar (sharp + ffmpeg) ----------
 async function createStickerFromBuffer(imageBuffer) {
     return new Promise(async (resolve, reject) => {
         try {
@@ -86,6 +99,7 @@ async function createStickerFromBuffer(imageBuffer) {
     });
 }
 
+// ---------- Daftar Command (modular) ----------
 const commands = {
     stiker: async (message, args) => {
         if (message.hasQuotedMsg) {
@@ -126,6 +140,7 @@ const commands = {
     }
 };
 
+// ---------- Handler untuk command ----------
 async function handleCommand(message) {
     const body = message.body;
     if (!body.startsWith('/')) return false;
@@ -143,6 +158,7 @@ async function handleCommand(message) {
     return false;
 }
 
+// ---------- Handler untuk chat biasa dengan AI ----------
 async function handleAIChat(message) {
     if (message.hasMedia) {
         try {
@@ -157,32 +173,43 @@ async function handleAIChat(message) {
     await message.reply(reply);
 }
 
+// ---------- Event: Pesan masuk ----------
 client.on('message', async (message) => {
     if (message.from === 'status@broadcast') return;
     const isCommand = await handleCommand(message);
     if (!isCommand) await handleAIChat(message);
 });
 
+// ---------- Event: QR Code ----------
 client.on('qr', async (qr) => {
-    console.log('QR received');
+    console.log('QR Code received, generating image...');
     latestQR = qr;
     try {
         latestQRImage = await qrcode.toDataURL(qr);
-    } catch (err) {}
+    } catch (err) {
+        console.error('Gagal generate QR image:', err);
+    }
 });
 
+// ---------- Event: Client siap ----------
 client.on('ready', () => {
     console.log('✅ Bot WhatsApp Aktif!');
     latestQR = null;
 });
 
+// ---------- Web server untuk menampilkan QR via link ----------
 app.get('/', (req, res) => {
     res.send(`
         <html>
-        <body style="text-align:center;">
-            <h2>WhatsApp AI Bot</h2>
-            ${latestQRImage ? `<img src="${latestQRImage}" style="width:300px;" />` : '<p>Belum ada QR. Refresh.</p>'}
-            <p>Status: ${client.info ? '✅ Online' : '⏳ Menunggu login'}</p>
+        <head><title>WhatsApp AI Bot</title></head>
+        <body style="text-align:center;font-family:Arial;padding:20px;">
+            <h2>🤖 WhatsApp AI Bot</h2>
+            <p>Scan QR code di bawah menggunakan WhatsApp:</p>
+            ${latestQRImage ? `<img src="${latestQRImage}" style="width:300px;height:300px;" />` : '<p>Belum ada QR code. Tunggu sebentar...</p>'}
+            <p>Jika QR tidak muncul, refresh halaman ini.</p>
+            <hr />
+            <p>Status Bot: ${client.info ? '✅ Online' : '⏳ Menunggu login...'}</p>
+            <p>Command: /help, /stiker, /ping</p>
         </body>
         </html>
     `);
@@ -190,17 +217,23 @@ app.get('/', (req, res) => {
 
 app.get('/qr', (req, res) => {
     if (latestQRImage) {
-        res.send(`<html><body><img src="${latestQRImage}" /></body></html>`);
+        res.send(`<html><body style="text-align:center;"><img src="${latestQRImage}" /><p>Scan QR ini dengan WhatsApp</p></body></html>`);
     } else if (latestQR) {
         qrcode.toDataURL(latestQR, (err, url) => {
-            if (err) return res.send('Error QR');
+            if (err) return res.send('Gagal generate QR');
             latestQRImage = url;
-            res.send(`<html><body><img src="${url}" /></body></html>`);
+            res.send(`<html><body style="text-align:center;"><img src="${url}" /></body></html>`);
         });
     } else {
-        res.send('Belum ada QR');
+        res.send('Belum ada QR. Pastikan bot sudah jalan dan belum login.');
     }
 });
 
-app.listen(PORT, () => console.log(`🌐 Server running on port ${PORT}`));
+// Jalankan web server
+app.listen(PORT, () => {
+    console.log(`🌐 Web server running on port ${PORT}`);
+    console.log(`📱 Buka di HP: https://your-app.railway.app/qr untuk scan QR`);
+});
+
+// Jalankan WhatsApp client
 client.initialize();
