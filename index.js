@@ -1,239 +1,74 @@
-// index.js - WhatsApp AI Bot dengan fitur stiker (menggunakan sharp + ffmpeg)
-const { Client, LocalAuth } = require('whatsapp-web.js');
-const express = require('express');
-const qrcode = require('qrcode');
-const axios = require('axios');
-const sharp = require('sharp');
-const ffmpeg = require('fluent-ffmpeg');
-const ffmpegPath = require('ffmpeg-static');
-const { Readable } = require('stream');
-require('dotenv').config();
+import makeWASocket, { useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
+import qrcode from 'qrcode-terminal';
+import express from 'express';
+import axios from 'axios';
+import dotenv from 'dotenv';
 
-// Set path ffmpeg
-ffmpeg.setFfmpegPath(ffmpegPath);
-
+dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Konfigurasi OpenAI
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const AI_MODEL = process.env.AI_MODEL || "gpt-3.5-turbo";
+const OPENAI_KEY = process.env.OPENAI_API_KEY;
 
-// State untuk QR code
-let latestQR = null;
-let latestQRImage = null;
-
-// Inisialisasi WhatsApp Client dengan konfigurasi Puppeteer yang benar
-const client = new Client({
-    authStrategy: new LocalAuth(),
-    puppeteer: {
-        headless: true,
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--disable-gpu',
-            '--disable-features=HttpsFirstBalancedModeAutoEnable' // untuk menghindari error net::ERR_BLOCKED_BY_CLIENT
-        ]
-    }
-});
-
-// ---------- Fungsi AI ----------
-async function chatWithAI(userMessage) {
-    try {
-        const response = await axios.post('https://api.openai.com/v1/chat/completions', {
-            model: AI_MODEL,
-            messages: [{ role: 'user', content: userMessage }],
-            max_tokens: 300,
-            temperature: 0.7
-        }, {
-            headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' }
-        });
-        return response.data.choices[0].message.content;
-    } catch (error) {
-        console.error('❌ OpenAI Error:', error.response?.data || error.message);
-        return "Maaf, sedang terjadi gangguan. Coba lagi nanti ya.";
-    }
-}
-
-// ---------- Fungsi membuat stiker dari buffer gambar (sharp + ffmpeg) ----------
-async function createStickerFromBuffer(imageBuffer) {
-    return new Promise(async (resolve, reject) => {
-        try {
-            // Resize gambar ke 512x512 (ukuran stiker umum)
-            const resizedBuffer = await sharp(imageBuffer)
-                .resize(512, 512, { fit: 'cover' })
-                .toBuffer();
-
-            // Konversi ke WebP dengan ffmpeg
-            const inputStream = Readable.from(resizedBuffer);
-            const outputBuffers = [];
-            const command = ffmpeg(inputStream)
-                .inputFormat('image2')
-                .outputFormat('webp')
-                .videoCodec('libwebp')
-                .addOptions([
-                    '-loop 0',
-                    '-q:v 80',
-                    '-vf scale=512:512:force_original_aspect_ratio=increase,crop=512:512',
-                    '-lossless 0',
-                    '-preset default'
-                ]);
-
-            command.on('end', () => {
-                const stickerBuffer = Buffer.concat(outputBuffers);
-                resolve(stickerBuffer);
-            });
-            command.on('error', (err) => {
-                console.error('FFmpeg error:', err);
-                reject(err);
-            });
-
-            const writeStream = command.pipe();
-            writeStream.on('data', (chunk) => outputBuffers.push(chunk));
-        } catch (err) {
-            reject(err);
-        }
+async function chatAI(pesan) {
+  try {
+    const res = await axios.post('https://api.openai.com/v1/chat/completions', {
+      model: 'gpt-3.5-turbo',
+      messages: [{ role: 'user', content: pesan }]
+    }, {
+      headers: { 'Authorization': `Bearer ${OPENAI_KEY}`, 'Content-Type': 'application/json' }
     });
+    return res.data.choices[0].message.content;
+  } catch (e) {
+    return 'Maaf, AI error.';
+  }
 }
 
-// ---------- Daftar Command (modular) ----------
-const commands = {
-    stiker: async (message, args) => {
-        if (message.hasQuotedMsg) {
-            const quotedMsg = await message.getQuotedMessage();
-            if (quotedMsg.hasMedia) {
-                const media = await quotedMsg.downloadMedia();
-                if (media.mimetype.startsWith('image/')) {
-                    try {
-                        const imageBuffer = Buffer.from(media.data, 'base64');
-                        const stickerBuffer = await createStickerFromBuffer(imageBuffer);
-                        await client.sendMessage(message.from, stickerBuffer, { sendMediaAsSticker: true });
-                        await message.reply('✅ Stiker berhasil dibuat!');
-                    } catch (err) {
-                        console.error('Sticker creation error:', err);
-                        await message.reply('❌ Gagal membuat stiker. Pastikan gambar valid.');
-                    }
-                } else {
-                    await message.reply('❌ Balas ke GAMBAR, bukan media lain!');
-                }
-            } else {
-                await message.reply('❌ Tidak ada media yang dibalas.');
-            }
-        } else {
-            await message.reply('❌ Gunakan: balas gambar lalu ketik `/stiker`');
-        }
-    },
-    help: async (message, args) => {
-        await message.reply(
-            `🤖 *Daftar Perintah Bot*\n\n` +
-            `/stiker - Buat stiker dari gambar (balas gambar)\n` +
-            `/help - Bantuan ini\n` +
-            `/ping - Cek status bot\n\n` +
-            `💬 Chat biasa: Kirim pesan apapun, AI akan menjawab.`
-        );
-    },
-    ping: async (message, args) => {
-        await message.reply('🏓 Pong! Bot aktif.');
-    }
-};
+async function startBot() {
+  const { state, saveCreds } = await useMultiFileAuthState('auth');
+  const sock = makeWASocket({
+    auth: state,
+    printQRInTerminal: true,
+    logger: { level: 'silent' }
+  });
 
-// ---------- Handler untuk command ----------
-async function handleCommand(message) {
-    const body = message.body;
-    if (!body.startsWith('/')) return false;
-    const [cmdName, ...args] = body.slice(1).trim().split(/\s+/);
-    const command = commands[cmdName.toLowerCase()];
-    if (command) {
-        try {
-            await command(message, args);
-        } catch (err) {
-            console.error(`Error command ${cmdName}:`, err);
-            await message.reply('❌ Terjadi kesalahan.');
-        }
-        return true;
+  sock.ev.on('connection.update', (update) => {
+    if (update.qr) {
+      console.log('📱 SCAN QR CODE INI:');
+      qrcode.generate(update.qr, { small: true });
     }
-    return false;
+    if (update.connection === 'open') console.log('✅ BOT AKTIF!');
+    if (update.connection === 'close') startBot();
+  });
+
+  sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('messages.upsert', async ({ messages }) => {
+    const m = messages[0];
+    if (!m.message || m.key.fromMe) return;
+    const chat = m.key.remoteJid;
+    const text = m.message.conversation || m.message.extendedTextMessage?.text || '';
+    
+    if (text === '/help') {
+      await sock.sendMessage(chat, { text: 'Perintah: /stiker (balas gambar), chat biasa AI' });
+    }
+    else if (text === '/stiker') {
+      const quoted = m.message.extendedTextMessage?.contextInfo?.quotedMessage;
+      if (quoted?.imageMessage) {
+        const media = await sock.downloadMediaMessage(m);
+        await sock.sendMessage(chat, { sticker: media });
+        await sock.sendMessage(chat, { text: '✅ Stiker jadi' });
+      } else {
+        await sock.sendMessage(chat, { text: '❌ Balas gambar dulu dengan /stiker' });
+      }
+    }
+    else if (text.trim() && !text.startsWith('/')) {
+      const balasan = await chatAI(text);
+      await sock.sendMessage(chat, { text: balasan });
+    }
+  });
 }
 
-// ---------- Handler untuk chat biasa dengan AI ----------
-async function handleAIChat(message) {
-    if (message.hasMedia) {
-        try {
-            const media = await message.downloadMedia();
-            if (media.mimetype.startsWith('image/')) {
-                await message.reply("📸 Gambar diterima! Gunakan perintah `/stiker` (balas gambar ini) untuk buat stiker.");
-                return;
-            }
-        } catch(e) {}
-    }
-    const reply = await chatWithAI(message.body);
-    await message.reply(reply);
-}
-
-// ---------- Event: Pesan masuk ----------
-client.on('message', async (message) => {
-    if (message.from === 'status@broadcast') return;
-    const isCommand = await handleCommand(message);
-    if (!isCommand) await handleAIChat(message);
-});
-
-// ---------- Event: QR Code ----------
-client.on('qr', async (qr) => {
-    console.log('QR Code received, generating image...');
-    latestQR = qr;
-    try {
-        latestQRImage = await qrcode.toDataURL(qr);
-    } catch (err) {
-        console.error('Gagal generate QR image:', err);
-    }
-});
-
-// ---------- Event: Client siap ----------
-client.on('ready', () => {
-    console.log('✅ Bot WhatsApp Aktif!');
-    latestQR = null;
-});
-
-// ---------- Web server untuk menampilkan QR via link ----------
-app.get('/', (req, res) => {
-    res.send(`
-        <html>
-        <head><title>WhatsApp AI Bot</title></head>
-        <body style="text-align:center;font-family:Arial;padding:20px;">
-            <h2>🤖 WhatsApp AI Bot</h2>
-            <p>Scan QR code di bawah menggunakan WhatsApp:</p>
-            ${latestQRImage ? `<img src="${latestQRImage}" style="width:300px;height:300px;" />` : '<p>Belum ada QR code. Tunggu sebentar...</p>'}
-            <p>Jika QR tidak muncul, refresh halaman ini.</p>
-            <hr />
-            <p>Status Bot: ${client.info ? '✅ Online' : '⏳ Menunggu login...'}</p>
-            <p>Command: /help, /stiker, /ping</p>
-        </body>
-        </html>
-    `);
-});
-
-app.get('/qr', (req, res) => {
-    if (latestQRImage) {
-        res.send(`<html><body style="text-align:center;"><img src="${latestQRImage}" /><p>Scan QR ini dengan WhatsApp</p></body></html>`);
-    } else if (latestQR) {
-        qrcode.toDataURL(latestQR, (err, url) => {
-            if (err) return res.send('Gagal generate QR');
-            latestQRImage = url;
-            res.send(`<html><body style="text-align:center;"><img src="${url}" /></body></html>`);
-        });
-    } else {
-        res.send('Belum ada QR. Pastikan bot sudah jalan dan belum login.');
-    }
-});
-
-// Jalankan web server
-app.listen(PORT, () => {
-    console.log(`🌐 Web server running on port ${PORT}`);
-    console.log(`📱 Buka di HP: https://your-app.railway.app/qr untuk scan QR`);
-});
-
-// Jalankan WhatsApp client
-client.initialize();
+startBot();
+app.get('/', (req, res) => res.send('Bot running'));
+app.listen(PORT, () => console.log(`Web server port ${PORT}`));
