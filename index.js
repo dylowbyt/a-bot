@@ -2,8 +2,13 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const express = require('express');
 const qrcode = require('qrcode');
 const axios = require('axios');
-const { Sticker, StickerTypes } = require('@open-wa/wa-sticker-formatter');
+const sharp = require('sharp');
+const ffmpeg = require('fluent-ffmpeg');
+const ffmpegPath = require('ffmpeg-static');
+const { Readable } = require('stream');
 require('dotenv').config();
+
+ffmpeg.setFfmpegPath(ffmpegPath);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -40,14 +45,45 @@ async function chatWithAI(userMessage) {
     }
 }
 
-async function createStickerFromBuffer(buffer) {
-    const sticker = new Sticker(buffer, {
-        pack: 'AI Bot Sticker',
-        author: 'WhatsApp Bot',
-        type: StickerTypes.FULL,
-        quality: 80
+// Fungsi membuat stiker dari buffer gambar menggunakan sharp + ffmpeg
+async function createStickerFromBuffer(imageBuffer) {
+    return new Promise(async (resolve, reject) => {
+        try {
+            // Resize gambar ke 512x512 (ukuran stiker umum)
+            const resizedBuffer = await sharp(imageBuffer)
+                .resize(512, 512, { fit: 'cover' })
+                .toBuffer();
+
+            // Konversi ke WebP dengan ffmpeg
+            const inputStream = Readable.from(resizedBuffer);
+            const outputBuffers = [];
+            const command = ffmpeg(inputStream)
+                .inputFormat('image2')
+                .outputFormat('webp')
+                .videoCodec('libwebp')
+                .addOptions([
+                    '-loop 0',
+                    '-q:v 80',
+                    '-vf scale=512:512:force_original_aspect_ratio=increase,crop=512:512',
+                    '-lossless 0',
+                    '-preset default'
+                ]);
+
+            command.on('end', () => {
+                const stickerBuffer = Buffer.concat(outputBuffers);
+                resolve(stickerBuffer);
+            });
+            command.on('error', (err) => {
+                console.error('FFmpeg error:', err);
+                reject(err);
+            });
+
+            const writeStream = command.pipe();
+            writeStream.on('data', (chunk) => outputBuffers.push(chunk));
+        } catch (err) {
+            reject(err);
+        }
     });
-    return await sticker.toBuffer();
 }
 
 const commands = {
@@ -57,10 +93,15 @@ const commands = {
             if (quotedMsg.hasMedia) {
                 const media = await quotedMsg.downloadMedia();
                 if (media.mimetype.startsWith('image/')) {
-                    const buffer = Buffer.from(media.data, 'base64');
-                    const stickerBuffer = await createStickerFromBuffer(buffer);
-                    await client.sendMessage(message.from, stickerBuffer, { sendMediaAsSticker: true });
-                    await message.reply('✅ Stiker berhasil dibuat!');
+                    try {
+                        const imageBuffer = Buffer.from(media.data, 'base64');
+                        const stickerBuffer = await createStickerFromBuffer(imageBuffer);
+                        await client.sendMessage(message.from, stickerBuffer, { sendMediaAsSticker: true });
+                        await message.reply('✅ Stiker berhasil dibuat!');
+                    } catch (err) {
+                        console.error('Sticker creation error:', err);
+                        await message.reply('❌ Gagal membuat stiker. Pastikan gambar valid.');
+                    }
                 } else {
                     await message.reply('❌ Balas ke GAMBAR, bukan media lain!');
                 }
@@ -131,7 +172,7 @@ client.on('qr', async (qr) => {
 });
 
 client.on('ready', () => {
-    console.log('Bot WhatsApp Aktif!');
+    console.log('✅ Bot WhatsApp Aktif!');
     latestQR = null;
 });
 
@@ -141,7 +182,7 @@ app.get('/', (req, res) => {
         <body style="text-align:center;">
             <h2>WhatsApp AI Bot</h2>
             ${latestQRImage ? `<img src="${latestQRImage}" style="width:300px;" />` : '<p>Belum ada QR. Refresh.</p>'}
-            <p>Status: ${client.info ? 'Online' : 'Menunggu login'}</p>
+            <p>Status: ${client.info ? '✅ Online' : '⏳ Menunggu login'}</p>
         </body>
         </html>
     `);
@@ -161,5 +202,5 @@ app.get('/qr', (req, res) => {
     }
 });
 
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🌐 Server running on port ${PORT}`));
 client.initialize();
