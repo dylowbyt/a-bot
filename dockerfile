@@ -2,6 +2,7 @@ FROM node:20-slim
 
 RUN apt-get update && apt-get install -y \
     chromium \
+    ffmpeg \
     libx11-xcb1 \
     libxcb1 \
     libxcomposite1 \
