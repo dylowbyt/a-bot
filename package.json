@@ -1,7 +1,6 @@
 {
   "name": "whatsapp-ai-bot",
   "version": "1.0.0",
-  "description": "WhatsApp AI Bot with sticker maker",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
