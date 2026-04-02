@@ -1,6 +1,5 @@
 FROM node:20-slim
 
-# Install dependencies for Puppeteer/Chromium
 RUN apt-get update && apt-get install -y \
     chromium \
     libx11-xcb1 \
@@ -29,7 +28,6 @@ RUN npm install
 
 COPY . .
 
-# Set environment variable for Chromium
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 
